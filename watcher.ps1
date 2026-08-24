@@ -7,6 +7,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $lockScript = Join-Path $PSScriptRoot 'lock.ps1'
 $configPath = Join-Path $PSScriptRoot 'config.json'
+$logDirectory = Join-Path $env:LOCALAPPDATA 'ScreenVeil'
+$logPath = Join-Path $logDirectory 'watcher.log'
+
+function Write-WatcherLog([string]$Message) {
+    if (-not (Test-Path -LiteralPath $logDirectory)) {
+        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+    }
+    $line = '{0:u} {1}' -f [DateTime]::Now, $Message
+    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+}
 
 Add-Type @'
 using System;
@@ -37,6 +47,7 @@ if (-not $createdNew) { exit 0 }
 try {
     $threshold = [uint64]$IdleMinutes * 60 * 1000
     $armed = $true
+    Write-WatcherLog "Наблюдатель запущен; таймер: $IdleMinutes мин."
 
     while ($true) {
         $idle = [uint64][ScreenVeilIdle]::GetIdleMilliseconds()
@@ -49,14 +60,22 @@ try {
                 '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA',
                 '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f $lockScript)
             )
-            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
-            $armed = $false
-            $process.WaitForExit()
+            try {
+                $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $armed = $false
+                Write-WatcherLog 'Запущена автоматическая блокировка.'
+                $process.WaitForExit()
+                if ($process.ExitCode -ne 0) { Write-WatcherLog "Блокировка завершилась с кодом $($process.ExitCode)." }
+            } catch {
+                Write-WatcherLog "Ошибка запуска блокировки: $($_.Exception.Message)"
+                $armed = $false
+            }
         }
 
         Start-Sleep -Seconds 2
     }
 } finally {
+    Write-WatcherLog 'Наблюдатель остановлен.'
     $mutex.ReleaseMutex()
     $mutex.Dispose()
 }

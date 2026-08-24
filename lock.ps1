@@ -11,6 +11,11 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 
+# Не допускаем двух наложенных друг на друга окон блокировки.
+$lockMutexCreated = $false
+$lockMutex = [Threading.Mutex]::new($true, 'Local\ScreenVeilLockWindow', [ref]$lockMutexCreated)
+if (-not $lockMutexCreated) { exit 0 }
+
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -26,6 +31,13 @@ public static class ScreenVeilNative {
 # DPI-aware режим и SetWindowPos ниже используют реальные пиксели каждого монитора.
 [ScreenVeilNative]::SetProcessDPIAware() | Out-Null
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing, System.Windows.Forms
+
+foreach ($property in @('iterations', 'salt', 'hash', 'title', 'subtitle')) {
+    if ($null -eq $config.$property) {
+        [System.Windows.MessageBox]::Show('Файл config.json повреждён. Задайте пароль заново.', 'ScreenVeil') | Out-Null
+        exit 1
+    }
+}
 
 function Test-Password([string]$Password) {
     $salt = [Convert]::FromBase64String([string]$config.salt)
@@ -165,8 +177,14 @@ foreach ($item in $windows) {
     $item.Add_Closing({ param($sender, $event) if (-not $script:unlocked) { $event.Cancel = $true } })
     $item.Add_PreviewKeyDown({
         param($sender, $event)
-        if (($event.Key -eq 'F4' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt)) -or
-            ($event.Key -eq 'Tab' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt))) {
+        $modifiers = [Windows.Input.Keyboard]::Modifiers
+        $blocked =
+            ($event.Key -in @('LWin', 'RWin')) -or
+            ($event.Key -eq 'F4' -and $modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt)) -or
+            ($event.Key -eq 'Tab' -and $modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt)) -or
+            ($event.Key -eq 'Escape' -and $modifiers.HasFlag([Windows.Input.ModifierKeys]::Control)) -or
+            ($event.Key -eq 'D' -and $modifiers.HasFlag([Windows.Input.ModifierKeys]::Windows))
+        if ($blocked) {
             $event.Handled = $true
         }
     })
@@ -175,5 +193,10 @@ $primaryWindow.Add_Deactivated({ $primaryWindow.Activate() | Out-Null; $password
 $primaryWindow.Add_ContentRendered({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
 
 foreach ($item in $windows) { if ($item -ne $primaryWindow) { $item.Show() } }
-[void]$primaryWindow.ShowDialog()
+try {
+    [void]$primaryWindow.ShowDialog()
+} finally {
+    $lockMutex.ReleaseMutex()
+    $lockMutex.Dispose()
+}
 

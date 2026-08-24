@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $lockScript = Join-Path $PSScriptRoot 'lock.ps1'
+$lockExecutable = Join-Path $PSScriptRoot 'ScreenVeil.exe'
 $configPath = Join-Path $PSScriptRoot 'config.json'
 $logDirectory = Join-Path $env:LOCALAPPDATA 'ScreenVeil'
 $logPath = Join-Path $logDirectory 'watcher.log'
@@ -56,12 +57,16 @@ try {
             # После закрытия заставки ждём реального ввода, чтобы не запустить её снова мгновенно.
             if ($idle -lt 5000) { $armed = $true }
         } elseif ($idle -ge $threshold -and (Test-Path -LiteralPath $configPath)) {
-            $arguments = @(
-                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA',
-                '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f $lockScript)
-            )
             try {
-                $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                if (Test-Path -LiteralPath $lockExecutable) {
+                    $process = Start-Process -FilePath $lockExecutable -WindowStyle Hidden -PassThru
+                } else {
+                    $arguments = @(
+                        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA',
+                        '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f $lockScript)
+                    )
+                    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                }
                 $armed = $false
                 Write-WatcherLog 'Запущена автоматическая блокировка.'
                 $process.WaitForExit()

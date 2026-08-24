@@ -20,7 +20,12 @@ function Test-Password([string]$Password) {
         $Password, $salt, [int]$config.iterations, [Security.Cryptography.HashAlgorithmName]::SHA256
     )
     try { $actual = $derive.GetBytes($expected.Length) } finally { $derive.Dispose() }
-    [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($actual, $expected)
+    if ($actual.Length -ne $expected.Length) { return $false }
+    $difference = 0
+    for ($index = 0; $index -lt $actual.Length; $index++) {
+        $difference = $difference -bor ($actual[$index] -bxor $expected[$index])
+    }
+    $difference -eq 0
 }
 
 # Снимок всего виртуального рабочего стола. Он остаётся неподвижным под размытием,

@@ -20,10 +20,47 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class ScreenVeilNative {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AccentPolicy {
+        public int AccentState;
+        public int AccentFlags;
+        public int GradientColor;
+        public int AnimationId;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowCompositionAttributeData {
+        public int Attribute;
+        public IntPtr Data;
+        public int SizeOfData;
+    }
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(
         IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] private static extern int SetWindowCompositionAttribute(
+        IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+    public static bool EnableAcrylic(IntPtr hwnd) {
+        AccentPolicy policy = new AccentPolicy {
+            AccentState = 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND
+            AccentFlags = 2,
+            GradientColor = unchecked((int)0xB8181410), // AABBGGRR: тёмный полупрозрачный оттенок
+            AnimationId = 0
+        };
+        int size = Marshal.SizeOf(policy);
+        IntPtr memory = Marshal.AllocHGlobal(size);
+        try {
+            Marshal.StructureToPtr(policy, memory, false);
+            WindowCompositionAttributeData data = new WindowCompositionAttributeData {
+                Attribute = 19, // WCA_ACCENT_POLICY
+                Data = memory,
+                SizeOfData = size
+            };
+            return SetWindowCompositionAttribute(hwnd, ref data) != 0;
+        } finally {
+            Marshal.FreeHGlobal(memory);
+        }
+    }
 }
 '@
 
@@ -54,39 +91,21 @@ function Test-Password([string]$Password) {
     $difference -eq 0
 }
 
-function Get-ScreenSnapshot([System.Drawing.Rectangle]$Bounds) {
-    $bitmap = [System.Drawing.Bitmap]::new($Bounds.Width, $Bounds.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $stream = $null
-    try {
-        $graphics.CopyFromScreen($Bounds.Left, $Bounds.Top, 0, 0, $bitmap.Size)
-        $stream = [IO.MemoryStream]::new()
-        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-        $stream.Position = 0
-        $image = [Windows.Media.Imaging.BitmapImage]::new()
-        $image.BeginInit()
-        $image.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-        $image.StreamSource = $stream
-        $image.EndInit()
-        $image.Freeze()
-        return $image
-    } finally {
-        $graphics.Dispose()
-        $bitmap.Dispose()
-        if ($stream) { $stream.Dispose() }
-    }
-}
-
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False"
-        Topmost="True" Background="#10141C" AllowsTransparency="False">
+        Topmost="True" Background="Transparent" AllowsTransparency="False">
   <Grid>
-    <Image Name="Backdrop" Stretch="Fill">
-      <Image.Effect><BlurEffect Radius="18" KernelType="Gaussian"/></Image.Effect>
-    </Image>
-    <Border Background="#99070A10"/>
+    <Border>
+      <Border.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+          <GradientStop Color="#80111824" Offset="0"/>
+          <GradientStop Color="#A0080B12" Offset="0.55"/>
+          <GradientStop Color="#90111A2B" Offset="1"/>
+        </LinearGradientBrush>
+      </Border.Background>
+    </Border>
     <Border Name="LockPanel" Width="470" Padding="42,38" CornerRadius="24"
             Background="#E61A1F2A" BorderBrush="#35FFFFFF" BorderThickness="1"
             HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -124,7 +143,6 @@ foreach ($screen in $screens) {
     $reader = [Xml.XmlNodeReader]::new([xml]$xaml)
     $currentWindow = [Windows.Markup.XamlReader]::Load($reader)
     $reader.Dispose()
-    $currentWindow.FindName('Backdrop').Source = Get-ScreenSnapshot $screen.Bounds
     $currentWindow.FindName('Title').Text = [string]$config.title
     $currentWindow.FindName('Subtitle').Text = [string]$config.subtitle
 
@@ -138,6 +156,8 @@ foreach ($screen in $screens) {
     $currentWindow.Add_SourceInitialized({
         param($sender, $event)
         $handle = [Windows.Interop.WindowInteropHelper]::new($sender).Handle
+        # Настоящее живое размытие окон под ScreenVeil вместо замороженного скриншота.
+        [ScreenVeilNative]::EnableAcrylic($handle) | Out-Null
         # WDA_MONITOR: окно видно человеку, но системный снимок получает пустое содержимое.
         [ScreenVeilNative]::SetWindowDisplayAffinity($handle, 0x00000001) | Out-Null
         [ScreenVeilNative]::SetWindowPos(

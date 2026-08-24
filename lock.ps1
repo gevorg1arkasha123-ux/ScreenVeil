@@ -20,53 +20,24 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class ScreenVeilNative {
-    [StructLayout(LayoutKind.Sequential)]
-    private struct AccentPolicy {
-        public int AccentState;
-        public int AccentFlags;
-        public int GradientColor;
-        public int AnimationId;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WindowCompositionAttributeData {
-        public int Attribute;
-        public IntPtr Data;
-        public int SizeOfData;
-    }
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(
         IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
-    [DllImport("user32.dll")] private static extern int SetWindowCompositionAttribute(
-        IntPtr hwnd, ref WindowCompositionAttributeData data);
-
-    public static bool EnableAcrylic(IntPtr hwnd) {
-        AccentPolicy policy = new AccentPolicy {
-            AccentState = 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND
-            AccentFlags = 2,
-            GradientColor = unchecked((int)0xB8181410), // AABBGGRR: тёмный полупрозрачный оттенок
-            AnimationId = 0
-        };
-        int size = Marshal.SizeOf(policy);
-        IntPtr memory = Marshal.AllocHGlobal(size);
+    public static void EnableBestDpiAwareness() {
         try {
-            Marshal.StructureToPtr(policy, memory, false);
-            WindowCompositionAttributeData data = new WindowCompositionAttributeData {
-                Attribute = 19, // WCA_ACCENT_POLICY
-                Data = memory,
-                SizeOfData = size
-            };
-            return SetWindowCompositionAttribute(hwnd, ref data) != 0;
-        } finally {
-            Marshal.FreeHGlobal(memory);
-        }
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+            if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return;
+        } catch (EntryPointNotFoundException) { }
+        SetProcessDPIAware();
     }
 }
 '@
 
 # PowerShell 5.1 по умолчанию виртуализирует координаты при масштабе 125/150%.
 # DPI-aware режим и SetWindowPos ниже используют реальные пиксели каждого монитора.
-[ScreenVeilNative]::SetProcessDPIAware() | Out-Null
+[ScreenVeilNative]::EnableBestDpiAwareness()
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing, System.Windows.Forms
 
 foreach ($property in @('iterations', 'salt', 'hash', 'title', 'subtitle')) {
@@ -91,21 +62,42 @@ function Test-Password([string]$Password) {
     $difference -eq 0
 }
 
+function Get-ScreenSnapshot([System.Drawing.Rectangle]$Bounds) {
+    $bitmap = [System.Drawing.Bitmap]::new($Bounds.Width, $Bounds.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $stream = $null
+    try {
+        $graphics.CopyFromScreen($Bounds.Left, $Bounds.Top, 0, 0, $bitmap.Size)
+        $stream = [IO.MemoryStream]::new()
+        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+        $stream.Position = 0
+        $image = [Windows.Media.Imaging.BitmapImage]::new()
+        $image.BeginInit()
+        $image.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $image.StreamSource = $stream
+        $image.EndInit()
+        $image.Freeze()
+        return $image
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False"
-        Topmost="True" Background="Transparent" AllowsTransparency="False">
+        Topmost="True" Background="#10141C" AllowsTransparency="False"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType">
   <Grid>
-    <Border>
-      <Border.Background>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-          <GradientStop Color="#80111824" Offset="0"/>
-          <GradientStop Color="#A0080B12" Offset="0.55"/>
-          <GradientStop Color="#90111A2B" Offset="1"/>
-        </LinearGradientBrush>
-      </Border.Background>
-    </Border>
+    <Image Name="Backdrop" Stretch="Fill" SnapsToDevicePixels="True"
+           RenderOptions.BitmapScalingMode="HighQuality">
+      <Image.Effect><BlurEffect Radius="18" KernelType="Gaussian"/></Image.Effect>
+    </Image>
+    <Border Background="#99070A10"/>
     <Border Name="LockPanel" Width="470" Padding="42,38" CornerRadius="24"
             Background="#E61A1F2A" BorderBrush="#35FFFFFF" BorderThickness="1"
             HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -113,7 +105,16 @@ $xaml = @'
       <StackPanel>
         <Border Width="66" Height="66" CornerRadius="33" Background="#252D3A"
                 HorizontalAlignment="Center" Margin="0,0,0,22">
-          <TextBlock Text="🔒" FontSize="28" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Viewbox Width="30" Height="30" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Canvas Width="24" Height="24">
+              <Path Stroke="#EAF2FF" StrokeThickness="2.2" StrokeStartLineCap="Round"
+                    StrokeEndLineCap="Round" Data="M7,10 L7,7 C7,3.7 9,2 12,2 C15,2 17,3.7 17,7 L17,10"/>
+              <Path Fill="#4D6BFE" Stroke="#BFD0FF" StrokeThickness="1.2"
+                    Data="M5,9 L19,9 C20.1,9 21,9.9 21,11 L21,21 C21,22.1 20.1,23 19,23 L5,23 C3.9,23 3,22.1 3,21 L3,11 C3,9.9 3.9,9 5,9 Z"/>
+              <Ellipse Fill="White" Width="3" Height="3" Canvas.Left="10.5" Canvas.Top="14"/>
+              <Rectangle Fill="White" Width="2" Height="4" Canvas.Left="11" Canvas.Top="16"/>
+            </Canvas>
+          </Viewbox>
         </Border>
         <TextBlock Name="Title" Foreground="White" FontFamily="Segoe UI Semibold" FontSize="23"
                    TextAlignment="Center"/>
@@ -143,6 +144,7 @@ foreach ($screen in $screens) {
     $reader = [Xml.XmlNodeReader]::new([xml]$xaml)
     $currentWindow = [Windows.Markup.XamlReader]::Load($reader)
     $reader.Dispose()
+    $currentWindow.FindName('Backdrop').Source = Get-ScreenSnapshot $screen.Bounds
     $currentWindow.FindName('Title').Text = [string]$config.title
     $currentWindow.FindName('Subtitle').Text = [string]$config.subtitle
 
@@ -156,8 +158,6 @@ foreach ($screen in $screens) {
     $currentWindow.Add_SourceInitialized({
         param($sender, $event)
         $handle = [Windows.Interop.WindowInteropHelper]::new($sender).Handle
-        # Настоящее живое размытие окон под ScreenVeil вместо замороженного скриншота.
-        [ScreenVeilNative]::EnableAcrylic($handle) | Out-Null
         # WDA_MONITOR: окно видно человеку, но системный снимок получает пустое содержимое.
         [ScreenVeilNative]::SetWindowDisplayAffinity($handle, 0x00000001) | Out-Null
         [ScreenVeilNative]::SetWindowPos(

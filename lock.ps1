@@ -1,5 +1,7 @@
 ﻿[CmdletBinding()]
-param()
+param(
+    [switch]$DiagnosticsOnly
+)
 
 $ErrorActionPreference = 'Stop'
 $configPath = Join-Path $PSScriptRoot 'config.json'
@@ -211,6 +213,12 @@ foreach ($item in $windows) {
 }
 $primaryWindow.Add_Deactivated({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
 $primaryWindow.Add_ContentRendered({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
+
+if ($DiagnosticsOnly) {
+    $lockMutex.ReleaseMutex()
+    $lockMutex.Dispose()
+    exit 0
+}
 
 foreach ($item in $windows) { if ($item -ne $primaryWindow) { $item.Show() } }
 try {

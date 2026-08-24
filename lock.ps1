@@ -11,6 +11,20 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ScreenVeilNative {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(
+        IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+}
+'@
+
+# PowerShell 5.1 по умолчанию виртуализирует координаты при масштабе 125/150%.
+# DPI-aware режим и SetWindowPos ниже используют реальные пиксели каждого монитора.
+[ScreenVeilNative]::SetProcessDPIAware() | Out-Null
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing, System.Windows.Forms
 
 function Test-Password([string]$Password) {
@@ -28,26 +42,27 @@ function Test-Password([string]$Password) {
     $difference -eq 0
 }
 
-# Снимок всего виртуального рабочего стола. Он остаётся неподвижным под размытием,
-# поэтому содержимое окон и уведомлений после запуска не просвечивает.
-$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bitmap = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-try {
-    $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
-    $stream = [IO.MemoryStream]::new()
-    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-    $stream.Position = 0
-    $source = [Windows.Media.Imaging.BitmapImage]::new()
-    $source.BeginInit()
-    $source.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-    $source.StreamSource = $stream
-    $source.EndInit()
-    $source.Freeze()
-} finally {
-    $graphics.Dispose()
-    $bitmap.Dispose()
-    if ($stream) { $stream.Dispose() }
+function Get-ScreenSnapshot([System.Drawing.Rectangle]$Bounds) {
+    $bitmap = [System.Drawing.Bitmap]::new($Bounds.Width, $Bounds.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $stream = $null
+    try {
+        $graphics.CopyFromScreen($Bounds.Left, $Bounds.Top, 0, 0, $bitmap.Size)
+        $stream = [IO.MemoryStream]::new()
+        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+        $stream.Position = 0
+        $image = [Windows.Media.Imaging.BitmapImage]::new()
+        $image.BeginInit()
+        $image.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $image.StreamSource = $stream
+        $image.EndInit()
+        $image.Freeze()
+        return $image
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        if ($stream) { $stream.Dispose() }
+    }
 }
 
 $xaml = @'
@@ -60,7 +75,7 @@ $xaml = @'
       <Image.Effect><BlurEffect Radius="18" KernelType="Gaussian"/></Image.Effect>
     </Image>
     <Border Background="#99070A10"/>
-    <Border Width="470" Padding="42,38" CornerRadius="24"
+    <Border Name="LockPanel" Width="470" Padding="42,38" CornerRadius="24"
             Background="#E61A1F2A" BorderBrush="#35FFFFFF" BorderThickness="1"
             HorizontalAlignment="Center" VerticalAlignment="Center">
       <Border.Effect><DropShadowEffect BlurRadius="45" ShadowDepth="0" Opacity="0.65"/></Border.Effect>
@@ -89,26 +104,49 @@ $xaml = @'
 </Window>
 '@
 
-$reader = [Xml.XmlNodeReader]::new([xml]$xaml)
-$window = [Windows.Markup.XamlReader]::Load($reader)
-$reader.Dispose()
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$windows = [Collections.Generic.List[Windows.Window]]::new()
+$primaryWindow = $null
 
-$window.Left = $bounds.Left
-$window.Top = $bounds.Top
-$window.Width = $bounds.Width
-$window.Height = $bounds.Height
-$window.FindName('Backdrop').Source = $source
-$window.FindName('Title').Text = [string]$config.title
-$window.FindName('Subtitle').Text = [string]$config.subtitle
-$passwordBox = $window.FindName('Password')
-$errorText = $window.FindName('Error')
-$unlockButton = $window.FindName('Unlock')
+foreach ($screen in $screens) {
+    $reader = [Xml.XmlNodeReader]::new([xml]$xaml)
+    $currentWindow = [Windows.Markup.XamlReader]::Load($reader)
+    $reader.Dispose()
+    $currentWindow.FindName('Backdrop').Source = Get-ScreenSnapshot $screen.Bounds
+    $currentWindow.FindName('Title').Text = [string]$config.title
+    $currentWindow.FindName('Subtitle').Text = [string]$config.subtitle
+
+    if ($screen.Primary) {
+        $primaryWindow = $currentWindow
+    } else {
+        $currentWindow.FindName('LockPanel').Visibility = 'Collapsed'
+    }
+
+    $targetBounds = $screen.Bounds
+    $currentWindow.Add_SourceInitialized({
+        param($sender, $event)
+        $handle = [Windows.Interop.WindowInteropHelper]::new($sender).Handle
+        # WDA_MONITOR: окно видно человеку, но системный снимок получает пустое содержимое.
+        [ScreenVeilNative]::SetWindowDisplayAffinity($handle, 0x00000001) | Out-Null
+        [ScreenVeilNative]::SetWindowPos(
+            $handle, [IntPtr](-1), $targetBounds.Left, $targetBounds.Top,
+            $targetBounds.Width, $targetBounds.Height, 0x0040
+        ) | Out-Null
+    }.GetNewClosure())
+    $windows.Add($currentWindow)
+}
+
+if (-not $primaryWindow) { throw 'Не удалось определить основной монитор.' }
+
+$passwordBox = $primaryWindow.FindName('Password')
+$errorText = $primaryWindow.FindName('Error')
+$unlockButton = $primaryWindow.FindName('Unlock')
 $script:unlocked = $false
 
 $unlock = {
     if (Test-Password $passwordBox.Password) {
         $script:unlocked = $true
-        $window.Close()
+        foreach ($item in $windows) { $item.Close() }
     } else {
         $errorText.Visibility = 'Visible'
         $passwordBox.Clear()
@@ -123,16 +161,19 @@ $passwordBox.Add_KeyDown({
     elseif ($event.Key -eq [Windows.Input.Key]::Escape) { $event.Handled = $true }
 })
 $passwordBox.Add_PasswordChanged({ $errorText.Visibility = 'Collapsed' })
-$window.Add_Closing({ param($sender, $event) if (-not $script:unlocked) { $event.Cancel = $true } })
-$window.Add_PreviewKeyDown({
-    param($sender, $event)
-    if (($event.Key -eq 'F4' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt)) -or
-        ($event.Key -eq 'Tab' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt))) {
-        $event.Handled = $true
-    }
-})
-$window.Add_Deactivated({ $window.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
-$window.Add_ContentRendered({ $window.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
+foreach ($item in $windows) {
+    $item.Add_Closing({ param($sender, $event) if (-not $script:unlocked) { $event.Cancel = $true } })
+    $item.Add_PreviewKeyDown({
+        param($sender, $event)
+        if (($event.Key -eq 'F4' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt)) -or
+            ($event.Key -eq 'Tab' -and [Windows.Input.Keyboard]::Modifiers.HasFlag([Windows.Input.ModifierKeys]::Alt))) {
+            $event.Handled = $true
+        }
+    })
+}
+$primaryWindow.Add_Deactivated({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
+$primaryWindow.Add_ContentRendered({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
 
-[void]$window.ShowDialog()
+foreach ($item in $windows) { if ($item -ne $primaryWindow) { $item.Show() } }
+[void]$primaryWindow.ShowDialog()
 

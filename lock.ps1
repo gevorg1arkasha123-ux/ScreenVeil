@@ -12,6 +12,7 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 }
 
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$captureProtectionEnabled = $config.PSObject.Properties.Name -contains 'captureProtection' -and [bool]$config.captureProtection
 
 # Не допускаем двух наложенных друг на друга окон блокировки.
 $lockMutexCreated = $false
@@ -186,8 +187,9 @@ foreach ($screen in $screens) {
     $currentWindow.Add_SourceInitialized({
         param($sender, $event)
         $handle = [Windows.Interop.WindowInteropHelper]::new($sender).Handle
-        # WDA_MONITOR: окно видно человеку, но системный снимок получает пустое содержимое.
-        [ScreenVeilNative]::SetWindowDisplayAffinity($handle, 0x00000001) | Out-Null
+        # WDA_MONITOR несовместим с AnyDesk: включается только в явном anti-screenshot режиме.
+        $affinity = if ($captureProtectionEnabled) { 0x00000001 } else { 0x00000000 }
+        [ScreenVeilNative]::SetWindowDisplayAffinity($handle, $affinity) | Out-Null
         [ScreenVeilNative]::SetWindowPos(
             $handle, [IntPtr](-1), $targetBounds.Left, $targetBounds.Top,
             $targetBounds.Width, $targetBounds.Height, 0x0040

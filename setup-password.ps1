@@ -31,6 +31,7 @@ try { $hash = $derive.GetBytes(32) } finally { $derive.Dispose() }
     iterations = $iterations
     salt = [Convert]::ToBase64String($salt)
     hash = [Convert]::ToBase64String($hash)
+    captureProtection = $false
     title = 'КОМПЬЮТЕР ЗАБЛОКИРОВАН'
     subtitle = 'Введите пароль, чтобы продолжить'
 } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8

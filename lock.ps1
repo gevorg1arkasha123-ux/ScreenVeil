@@ -158,8 +158,9 @@ $xaml = @'
         <PasswordBox Name="Password" Height="50" FontSize="20" Padding="15,9" Focusable="True"
                      Foreground="White" Background="#202735" BorderBrush="#46536A"
                      BorderThickness="1" CaretBrush="White"/>
-        <TextBlock Name="Error" Text="Неверный пароль" Foreground="#FF7185" FontSize="13"
-                   TextAlignment="Center" Margin="0,10,0,0" Visibility="Collapsed"/>
+        <TextBlock Name="Error" Text="Неверный пароль. Попробуйте ещё раз" Foreground="#FF7185"
+                   FontFamily="Segoe UI Semibold" FontSize="13" MinHeight="18"
+                   TextAlignment="Center" Margin="0,10,0,0" Visibility="Hidden"/>
         <Button Name="Unlock" Content="РАЗБЛОКИРОВАТЬ" Height="48" Margin="0,18,0,0"
                 Foreground="White" Background="#4D6BFE" BorderThickness="0"
                 FontFamily="Segoe UI Semibold" FontSize="13" Cursor="Hand"/>
@@ -211,6 +212,9 @@ if (-not $primaryWindow) { throw 'Не удалось определить ос�
 $passwordBox = $primaryWindow.FindName('Password')
 $errorText = $primaryWindow.FindName('Error')
 $unlockButton = $primaryWindow.FindName('Unlock')
+$brushConverter = [Windows.Media.BrushConverter]::new()
+$normalPasswordBorder = $brushConverter.ConvertFromString('#46536A')
+$errorPasswordBorder = $brushConverter.ConvertFromString('#FF5F73')
 $script:unlocked = $false
 $clockTimer = [Windows.Threading.DispatcherTimer]::new()
 $clockTimer.Interval = [TimeSpan]::FromSeconds(1)
@@ -248,9 +252,11 @@ $unlock = {
         $script:unlocked = $true
         foreach ($item in $windows) { $item.Close() }
     } else {
-        $errorText.Visibility = 'Visible'
         $passwordBox.Clear()
-        $passwordBox.Focus() | Out-Null
+        $errorText.Visibility = 'Visible'
+        $passwordBox.BorderBrush = $errorPasswordBorder
+        $passwordBox.BorderThickness = [Windows.Thickness]::new(2)
+        & $forcePasswordFocus
     }
 }
 
@@ -260,7 +266,11 @@ $passwordBox.Add_KeyDown({
     if ($event.Key -eq [Windows.Input.Key]::Enter) { & $unlock; $event.Handled = $true }
     elseif ($event.Key -eq [Windows.Input.Key]::Escape) { $event.Handled = $true }
 })
-$passwordBox.Add_PasswordChanged({ $errorText.Visibility = 'Collapsed' })
+$passwordBox.Add_PasswordChanged({
+    $errorText.Visibility = 'Hidden'
+    $passwordBox.BorderBrush = $normalPasswordBorder
+    $passwordBox.BorderThickness = [Windows.Thickness]::new(1)
+})
 foreach ($item in $windows) {
     $item.Add_Closing({ param($sender, $event) if (-not $script:unlocked) { $event.Cancel = $true } })
     $item.Add_PreviewKeyDown({

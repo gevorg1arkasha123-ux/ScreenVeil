@@ -18,7 +18,8 @@ if ([string]::IsNullOrWhiteSpace($first)) { throw 'Пароль не может 
 if ($first -cne $second) { throw 'Пароли не совпадают.' }
 
 $salt = [byte[]]::new(16)
-[Security.Cryptography.RandomNumberGenerator]::Fill($salt)
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
 $iterations = 210000
 $derive = [Security.Cryptography.Rfc2898DeriveBytes]::new(
     $first, $salt, $iterations, [Security.Cryptography.HashAlgorithmName]::SHA256
@@ -30,6 +31,7 @@ try { $hash = $derive.GetBytes(32) } finally { $derive.Dispose() }
     iterations = $iterations
     salt = [Convert]::ToBase64String($salt)
     hash = [Convert]::ToBase64String($hash)
+    captureProtection = $false
     title = 'КОМПЬЮТЕР ЗАБЛОКИРОВАН'
     subtitle = 'Введите пароль, чтобы продолжить'
 } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8

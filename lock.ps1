@@ -127,6 +127,12 @@ $xaml = @'
       <Image.Effect><BlurEffect Radius="18" KernelType="Gaussian"/></Image.Effect>
     </Image>
     <Border Background="#99070A10"/>
+    <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,32,0,0"
+            Padding="16,8" CornerRadius="14" Background="#55151B26"
+            BorderBrush="#22FFFFFF" BorderThickness="1">
+      <TextBlock Name="Clock" Foreground="#E7EDF7" FontFamily="Segoe UI Semibold"
+                 FontSize="20" TextAlignment="Center" TextOptions.TextFormattingMode="Display"/>
+    </Border>
     <Border Name="LockPanel" Width="470" Padding="42,38" CornerRadius="24"
             Background="#E61A1F2A" BorderBrush="#35FFFFFF" BorderThickness="1"
             HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -167,6 +173,7 @@ $xaml = @'
 
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $windows = [Collections.Generic.List[Windows.Window]]::new()
+$clockBlocks = [Collections.Generic.List[Windows.Controls.TextBlock]]::new()
 $primaryWindow = $null
 
 foreach ($screen in $screens) {
@@ -176,6 +183,7 @@ foreach ($screen in $screens) {
     $currentWindow.FindName('Backdrop').Source = Get-ScreenSnapshot $screen.Bounds
     $currentWindow.FindName('Title').Text = [string]$config.title
     $currentWindow.FindName('Subtitle').Text = [string]$config.subtitle
+    $clockBlocks.Add($currentWindow.FindName('Clock'))
 
     if ($screen.Primary) {
         $primaryWindow = $currentWindow
@@ -204,6 +212,16 @@ $passwordBox = $primaryWindow.FindName('Password')
 $errorText = $primaryWindow.FindName('Error')
 $unlockButton = $primaryWindow.FindName('Unlock')
 $script:unlocked = $false
+$clockTimer = [Windows.Threading.DispatcherTimer]::new()
+$clockTimer.Interval = [TimeSpan]::FromSeconds(1)
+$updateClock = {
+    $now = Get-Date
+    $value = $now.ToString('HH:mm  ·  d MMMM, dddd')
+    foreach ($clockBlock in $clockBlocks) { $clockBlock.Text = $value }
+}
+$clockTimer.Add_Tick({ & $updateClock })
+& $updateClock
+$clockTimer.Start()
 $focusTimer = [Windows.Threading.DispatcherTimer]::new()
 $focusTimer.Interval = [TimeSpan]::FromMilliseconds(150)
 $script:focusAttempts = 0
@@ -271,6 +289,7 @@ $primaryWindow.Add_ContentRendered({
 })
 
 if ($DiagnosticsOnly) {
+    $clockTimer.Stop()
     $lockMutex.ReleaseMutex()
     $lockMutex.Dispose()
     exit 0
@@ -280,6 +299,7 @@ foreach ($item in $windows) { if ($item -ne $primaryWindow) { $item.Show() } }
 try {
     [void]$primaryWindow.ShowDialog()
 } finally {
+    $clockTimer.Stop()
     $focusTimer.Stop()
     $lockMutex.ReleaseMutex()
     $lockMutex.Dispose()

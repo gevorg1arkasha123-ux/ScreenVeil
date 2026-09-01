@@ -91,6 +91,8 @@ if (-not $createdNew) { exit 0 }
 
 try {
     $threshold = [uint64]$IdleMinutes * 60 * 1000
+    $warningDurationSeconds = 30
+    $warningThreshold = $threshold - ([uint64]$warningDurationSeconds * 1000)
     $armed = $true
     $lastMediaUtc = [DateTime]::MinValue
     $mediaWasActive = $false
@@ -121,8 +123,20 @@ try {
         if (-not $armed) {
             # После закрытия заставки ждём реального ввода, чтобы не запустить её снова мгновенно.
             if ($idle -lt 5000) { $armed = $true }
-        } elseif (-not $mediaActive -and $effectiveIdle -ge $threshold -and (Test-Path -LiteralPath $configPath)) {
+        } elseif (-not $mediaActive -and $effectiveIdle -ge $warningThreshold -and (Test-Path -LiteralPath $configPath)) {
             try {
+                if (Test-Path -LiteralPath $lockExecutable) {
+                    Write-WatcherLog "Показано предупреждение за $warningDurationSeconds сек. до блокировки."
+                    $warning = Start-Process -FilePath $lockExecutable `
+                        -ArgumentList @('--warning', $warningDurationSeconds) -PassThru
+                    $warning.WaitForExit()
+                    if ($warning.ExitCode -eq 2) {
+                        Write-WatcherLog 'Автоблокировка отменена активностью пользователя.'
+                        continue
+                    }
+                } else {
+                    Start-Sleep -Seconds $warningDurationSeconds
+                }
                 if (Test-Path -LiteralPath $lockExecutable) {
                     $process = Start-Process -FilePath $lockExecutable -WindowStyle Hidden -PassThru
                 } else {

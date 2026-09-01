@@ -8,10 +8,13 @@ using System.Windows.Forms;
 internal static class ScreenVeilLauncher
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
-        string scriptPath = Path.Combine(baseDirectory, "lock.ps1");
+        bool warningMode = args.Length > 0 && args[0] == "--warning";
+        int warningSeconds = 30;
+        if (warningMode && args.Length > 1) int.TryParse(args[1], out warningSeconds);
+        string scriptPath = Path.Combine(baseDirectory, warningMode ? "warning.ps1" : "lock.ps1");
         string logDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenVeil");
         string logPath = Path.Combine(logDirectory, "launcher.log");
@@ -35,8 +38,9 @@ internal static class ScreenVeilLauncher
                 runspace.Open();
                 shell.Runspace = runspace;
                 shell.AddCommand(scriptPath);
-                if (diagnosticsOnly) shell.AddParameter("DiagnosticsOnly");
-                shell.Invoke();
+                if (diagnosticsOnly && !warningMode) shell.AddParameter("DiagnosticsOnly");
+                if (warningMode) shell.AddParameter("Seconds", warningSeconds);
+                var results = shell.Invoke();
                 if (shell.HadErrors)
                 {
                     string message = string.Join(Environment.NewLine,
@@ -47,6 +51,9 @@ internal static class ScreenVeilLauncher
                         "ScreenVeil", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return 1;
                 }
+                if (warningMode && results.Any(result =>
+                    string.Equals(Convert.ToString(result.BaseObject), "CANCELLED", StringComparison.Ordinal)))
+                    return 2;
             }
             return 0;
         }

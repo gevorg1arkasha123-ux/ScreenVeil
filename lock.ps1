@@ -27,12 +27,38 @@ public static class ScreenVeilNative {
     [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(
         IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr processId);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr SetFocus(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
     public static void EnableBestDpiAwareness() {
         try {
             // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
             if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return;
         } catch (EntryPointNotFoundException) { }
         SetProcessDPIAware();
+    }
+
+    public static bool ForceForeground(IntPtr hwnd) {
+        IntPtr foreground = GetForegroundWindow();
+        uint currentThread = GetCurrentThreadId();
+        uint foregroundThread = foreground == IntPtr.Zero
+            ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
+        bool attached = foregroundThread != 0 && foregroundThread != currentThread
+            && AttachThreadInput(currentThread, foregroundThread, true);
+        try {
+            ShowWindow(hwnd, 5); // SW_SHOW
+            BringWindowToTop(hwnd);
+            bool result = SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+            return result;
+        } finally {
+            if (attached) AttachThreadInput(currentThread, foregroundThread, false);
+        }
     }
 }
 '@
@@ -122,7 +148,7 @@ $xaml = @'
                    TextAlignment="Center"/>
         <TextBlock Name="Subtitle" Foreground="#AEB8C8" FontFamily="Segoe UI" FontSize="14"
                    TextAlignment="Center" Margin="0,8,0,26"/>
-        <PasswordBox Name="Password" Height="50" FontSize="20" Padding="15,9"
+        <PasswordBox Name="Password" Height="50" FontSize="20" Padding="15,9" Focusable="True"
                      Foreground="White" Background="#202735" BorderBrush="#46536A"
                      BorderThickness="1" CaretBrush="White"/>
         <TextBlock Name="Error" Text="Неверный пароль" Foreground="#FF7185" FontSize="13"
@@ -176,6 +202,26 @@ $passwordBox = $primaryWindow.FindName('Password')
 $errorText = $primaryWindow.FindName('Error')
 $unlockButton = $primaryWindow.FindName('Unlock')
 $script:unlocked = $false
+$focusTimer = [Windows.Threading.DispatcherTimer]::new()
+$focusTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$script:focusAttempts = 0
+
+$forcePasswordFocus = {
+    $handle = [Windows.Interop.WindowInteropHelper]::new($primaryWindow).Handle
+    [ScreenVeilNative]::ForceForeground($handle) | Out-Null
+    $primaryWindow.Activate() | Out-Null
+    [Windows.Input.FocusManager]::SetFocusedElement($primaryWindow, $passwordBox)
+    [Windows.Input.Keyboard]::Focus($passwordBox) | Out-Null
+    $passwordBox.Focus() | Out-Null
+}
+
+$focusTimer.Add_Tick({
+    $script:focusAttempts++
+    & $forcePasswordFocus
+    if ($passwordBox.IsKeyboardFocusWithin -or $script:focusAttempts -ge 20) {
+        $focusTimer.Stop()
+    }
+})
 
 $unlock = {
     if (Test-Password $passwordBox.Password) {
@@ -211,8 +257,16 @@ foreach ($item in $windows) {
         }
     })
 }
-$primaryWindow.Add_Deactivated({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
-$primaryWindow.Add_ContentRendered({ $primaryWindow.Activate() | Out-Null; $passwordBox.Focus() | Out-Null })
+$primaryWindow.Add_Activated({
+    [Windows.Input.Keyboard]::Focus($passwordBox) | Out-Null
+    $passwordBox.Focus() | Out-Null
+})
+$primaryWindow.Add_Deactivated({ & $forcePasswordFocus })
+$primaryWindow.Add_ContentRendered({
+    & $forcePasswordFocus
+    $script:focusAttempts = 0
+    $focusTimer.Start()
+})
 
 if ($DiagnosticsOnly) {
     $lockMutex.ReleaseMutex()
@@ -224,6 +278,7 @@ foreach ($item in $windows) { if ($item -ne $primaryWindow) { $item.Show() } }
 try {
     [void]$primaryWindow.ShowDialog()
 } finally {
+    $focusTimer.Stop()
     $lockMutex.ReleaseMutex()
     $lockMutex.Dispose()
 }

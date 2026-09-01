@@ -28,27 +28,8 @@ public static class ScreenVeilIdle {
         public uint cbSize;
         public uint dwTime;
     }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT {
-        public int Left, Top, Right, Bottom;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO {
-        public uint cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-    }
-
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
-    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
-    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
-    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
-    [DllImport("powrprof.dll")]
-    private static extern uint CallNtPowerInformation(
-        int informationLevel, IntPtr input, uint inputLength, out uint output, uint outputLength);
 
     public static uint GetIdleMilliseconds() {
         LASTINPUTINFO info = new LASTINPUTINFO();
@@ -57,26 +38,49 @@ public static class ScreenVeilIdle {
         return unchecked((uint)Environment.TickCount - info.dwTime);
     }
 
-    public static bool IsForegroundFullscreen() {
-        IntPtr hwnd = GetForegroundWindow();
-        if (hwnd == IntPtr.Zero) return false;
-        RECT window;
-        if (!GetWindowRect(hwnd, out window)) return false;
-        IntPtr monitor = MonitorFromWindow(hwnd, 2); // MONITOR_DEFAULTTONEAREST
-        MONITORINFO info = new MONITORINFO();
-        info.cbSize = (uint)Marshal.SizeOf(info);
-        if (!GetMonitorInfo(monitor, ref info)) return false;
-        int windowWidth = window.Right - window.Left;
-        int windowHeight = window.Bottom - window.Top;
-        int monitorWidth = info.rcMonitor.Right - info.rcMonitor.Left;
-        int monitorHeight = info.rcMonitor.Bottom - info.rcMonitor.Top;
-        return windowWidth >= monitorWidth * 0.99 && windowHeight >= monitorHeight * 0.99;
-    }
+}
 
-    public static bool IsDisplayRequired() {
-        uint state;
-        uint status = CallNtPowerInformation(16, IntPtr.Zero, 0, out state, 4); // SystemExecutionState
-        return status == 0 && (state & 0x00000002) != 0; // ES_DISPLAY_REQUIRED
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+internal class MMDeviceEnumerator { }
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
+internal interface IMMDeviceEnumerator {
+    [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
+    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("D666063F-1587-4E43-81F1-B948E807363F")]
+internal interface IMMDevice {
+    [PreserveSig] int Activate(ref Guid iid, uint context, IntPtr activationParams,
+        [MarshalAs(UnmanagedType.IUnknown)] out object instance);
+}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064")]
+internal interface IAudioMeterInformation {
+    [PreserveSig] int GetPeakValue(out float peak);
+}
+
+public static class ScreenVeilAudio {
+    public static bool IsAudioPlaying() {
+        object enumeratorObject = null;
+        IMMDevice device = null;
+        object meterObject = null;
+        try {
+            enumeratorObject = new MMDeviceEnumerator();
+            IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)enumeratorObject;
+            if (enumerator.GetDefaultAudioEndpoint(0, 1, out device) != 0 || device == null) return false;
+            Guid iid = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
+            if (device.Activate(ref iid, 23, IntPtr.Zero, out meterObject) != 0 || meterObject == null) return false;
+            float peak;
+            if (((IAudioMeterInformation)meterObject).GetPeakValue(out peak) != 0) return false;
+            return peak > 0.0005f;
+        } catch {
+            return false;
+        } finally {
+            if (meterObject != null && Marshal.IsComObject(meterObject)) Marshal.FinalReleaseComObject(meterObject);
+            if (device != null && Marshal.IsComObject(device)) Marshal.FinalReleaseComObject(device);
+            if (enumeratorObject != null && Marshal.IsComObject(enumeratorObject)) Marshal.FinalReleaseComObject(enumeratorObject);
+        }
     }
 }
 '@
@@ -94,20 +98,24 @@ try {
 
     while ($true) {
         $idle = [uint64][ScreenVeilIdle]::GetIdleMilliseconds()
-        $mediaActive = [ScreenVeilIdle]::IsForegroundFullscreen() -or [ScreenVeilIdle]::IsDisplayRequired()
-        if ($mediaActive) {
+        $audioNow = [ScreenVeilAudio]::IsAudioPlaying()
+        if ($audioNow) {
             $lastMediaUtc = [DateTime]::UtcNow
-            if (-not $mediaWasActive) { Write-WatcherLog 'Автоблокировка приостановлена: полноэкранное окно или активное видео.' }
-        } elseif ($mediaWasActive) {
-            Write-WatcherLog 'Видео завершено; отсчёт бездействия начат заново.'
         }
-        $mediaWasActive = $mediaActive
 
         $sinceMedia = if ($lastMediaUtc -eq [DateTime]::MinValue) {
             [uint64]::MaxValue
         } else {
             [uint64]([DateTime]::UtcNow - $lastMediaUtc).TotalMilliseconds
         }
+        # Запас покрывает короткие тихие сцены, но после настоящей паузы быстро отпускает таймер.
+        $mediaActive = $sinceMedia -lt 30000
+        if ($mediaActive -and -not $mediaWasActive) {
+            Write-WatcherLog 'Автоблокировка приостановлена: обнаружено воспроизведение звука.'
+        } elseif (-not $mediaActive -and $mediaWasActive) {
+            Write-WatcherLog 'Воспроизведение остановлено; отсчёт бездействия начат заново.'
+        }
+        $mediaWasActive = $mediaActive
         $effectiveIdle = [Math]::Min($idle, $sinceMedia)
 
         if (-not $armed) {
